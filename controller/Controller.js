@@ -18,6 +18,11 @@ import {
   calculateMatchOutcome,
   parseMatchDate,
 } from './statsEngine';
+import {
+  changeOwnPassword as changeOwnPasswordWith,
+  setPlayerPassword as setPlayerPasswordWith,
+  removeLogin,
+} from './accountActions';
 
 const sortMatchesByDate = (list) =>
   [...list].sort((a, b) => parseMatchDate(b.date) - parseMatchDate(a.date));
@@ -167,8 +172,16 @@ export const useAppController = (initialRoute = 'Page1', session = null) => {
     };
 
     setPlayers((prev) => [...prev, newP]);
-    insertPlayer(newP).then(handleSaveResult);
+    // Resolves to the new id once the row exists (a password can only be set after that).
+    return insertPlayer(newP).then((result) => {
+      handleSaveResult(result);
+      if (result.error) throw new Error(result.error);
+      return newP.id;
+    });
   };
+
+  const changeOwnPassword = (password) => changeOwnPasswordWith(supabase, password);
+  const setPlayerPassword = (playerId, password) => setPlayerPasswordWith(supabase, playerId, password);
 
   const togglePlayerActive = (id) => {
     updateOnePlayer(id, (p) => ({ ...p, active: !p.active }));
@@ -180,8 +193,13 @@ export const useAppController = (initialRoute = 'Page1', session = null) => {
       'Speler definitief verwijderen',
       'Deze speler wordt ook direct uit alle wedstrijdopstellingen en aanwezigheidslijsten verwijderd. Weet je het zeker?',
       () => {
+        const authUserId = players.find((p) => p.id === id)?.authUserId ?? null;
         setPlayers((prevPlayers) => prevPlayers.filter((p) => p.id !== id));
-        deleteStoredPlayer(id).then(handleSaveResult);
+        deleteStoredPlayer(id).then((result) => {
+          handleSaveResult(result);
+          // Only once the row is gone may the login be removed (the server checks this too).
+          if (!result.error) removeLogin(supabase, authUserId);
+        });
 
         setMatches((prevMatches) => {
           const changedMatches = [];
@@ -325,6 +343,8 @@ export const useAppController = (initialRoute = 'Page1', session = null) => {
     isLoaded,
     reload,
     addPlayer,
+    changeOwnPassword,
+    setPlayerPassword,
     togglePlayerActive,
     deletePlayer,
     createMatch,

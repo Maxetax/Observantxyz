@@ -13,15 +13,28 @@ import {
   Alert,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import {
-  sanitizeName,
-  sanitizeText,
-  sanitizePasswordInput,
-  hashPassword,
-} from '../../controller/security';
+import { sanitizeName, sanitizeText, sanitizePasswordInput } from '../../controller/security';
+import { MIN_PASSWORD_LENGTH } from '../../controller/passwordRules';
+
+const notify = (message) => {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined') window.alert(message);
+  } else {
+    Alert.alert('Apollo', message);
+  }
+};
+
+const PASSWORD_MESSAGES = {
+  ok: 'Wachtwoord ingesteld.',
+  weak_password: `Het wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens bevatten.`,
+  forbidden: 'Alleen een admin mag wachtwoorden instellen.',
+  not_found: 'Deze speler kan niet inloggen (alleen actieve vaste spelers).',
+  invalid_request: 'Wachtwoord instellen mislukt.',
+  error: 'Wachtwoord instellen mislukt. Controleer je verbinding.',
+};
 
 export default function Page3_Spelers({ controller, currentUser }) {
-  const { players, addPlayer, updatePlayer, deletePlayer } = controller;
+  const { players, addPlayer, updatePlayer, deletePlayer, changeOwnPassword, setPlayerPassword } = controller;
   // Read admin rights from the live list, not the copy cached at login.
   const isAdmin = !!players.find((p) => p.id === currentUser?.id)?.isAdmin;
   const canEdit = (player) => isAdmin || player.id === currentUser?.id;
@@ -30,6 +43,7 @@ export default function Page3_Spelers({ controller, currentUser }) {
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [newName, setNewName] = useState('');
   const [newType, setNewType] = useState('VAST');
+  const [newStartPassword, setNewStartPassword] = useState('');
 
   // Edit modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -40,6 +54,7 @@ export default function Page3_Spelers({ controller, currentUser }) {
   const [editAddress, setEditAddress] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editNewPassword, setEditNewPassword] = useState('');
+  const [busy, setBusy] = useState(false);
 
   // Open Edit Modal
   const handleOpenEdit = (player) => {
@@ -55,34 +70,47 @@ export default function Page3_Spelers({ controller, currentUser }) {
 
   // Opslaan van bewerking
   const handleSaveEdit = async () => {
-    if (!editingPlayer) return;
+    if (!editingPlayer || busy) return;
     const cleanName = sanitizeName(editName).trim();
     if (!cleanName) {
-      alert('Vul een geldige naam in.');
+      notify('Vul een geldige naam in.');
       return;
     }
 
-    const payload = {
+    // Eigen wachtwoord wijzigen (alleen als ingevuld)
+    if (isSelf && editNewPassword.trim().length > 0) {
+      setBusy(true);
+      const { status } = await changeOwnPassword(editNewPassword);
+      setBusy(false);
+      if (status === 'weak_password') {
+        notify(`Het nieuwe wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens bevatten.`);
+        return;
+      }
+      if (status !== 'ok') {
+        notify('Wachtwoord wijzigen mislukt. Controleer je verbinding.');
+        return;
+      }
+    }
+
+    updatePlayer(editingPlayer.id, {
       name: cleanName,
       type: isAdmin ? editType : editingPlayer.type,
       phone: sanitizeText(editPhone),
       address: sanitizeText(editAddress),
       notes: sanitizeText(editNotes),
-    };
-
-    // Als de ingelogde gebruiker zichzelf bewerkt en een nieuw wachtwoord invult
-    if (currentUser?.id === editingPlayer.id && editNewPassword.trim().length > 0) {
-      const cleanPwd = sanitizePasswordInput(editNewPassword).trim();
-      if (cleanPwd.length < 4) {
-        alert('Het nieuwe wachtwoord moet minimaal 4 tekens bevatten.');
-        return;
-      }
-      payload.passwordHash = await hashPassword(cleanPwd);
-    }
-
-    updatePlayer(editingPlayer.id, payload);
+    });
     setEditModalVisible(false);
     setEditingPlayer(null);
+  };
+
+  // Admin: wachtwoord van een andere vaste speler instellen
+  const handleSetPassword = async () => {
+    if (!editingPlayer || busy) return;
+    setBusy(true);
+    const { status } = await setPlayerPassword(editingPlayer.id, editNewPassword);
+    setBusy(false);
+    notify(PASSWORD_MESSAGES[status] ?? PASSWORD_MESSAGES.error);
+    if (status === 'ok') setEditNewPassword('');
   };
 
   // Bevestigde verwijdering vanuit de edit modal
@@ -92,17 +120,35 @@ export default function Page3_Spelers({ controller, currentUser }) {
     deletePlayer(editingPlayer.id);
   };
 
-  // Nieuwe speler toevoegen
-  const handleAddSubmit = (e) => {
+  // Nieuwe speler toevoegen (vaste spelers krijgen direct een startwachtwoord)
+  const handleAddSubmit = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!isAdmin) return;
+    if (!isAdmin || busy) return;
     const cleanName = sanitizeName(newName).trim();
     if (!cleanName) {
-      alert('Vul een spelersnaam in.');
+      notify('Vul een spelersnaam in.');
       return;
     }
-    addPlayer(cleanName, newType);
-    setAddModalVisible(false);
+    if (newType === 'VAST' && newStartPassword.trim().length < MIN_PASSWORD_LENGTH) {
+      notify(`Kies een startwachtwoord van minimaal ${MIN_PASSWORD_LENGTH} tekens.`);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const newId = await addPlayer(cleanName, newType);
+      setAddModalVisible(false);
+      if (newType === 'VAST') {
+        const { status } = await setPlayerPassword(newId, newStartPassword);
+        if (status !== 'ok') {
+          notify('Speler toegevoegd, maar wachtwoord instellen mislukt. Stel het opnieuw in via Aanpassen.');
+        }
+      }
+    } catch {
+      // addPlayer already showed "Opslaan mislukt" and reloaded.
+    } finally {
+      setBusy(false);
+    }
   };
 
   const vastPlayers = players.filter((p) => p.type === 'VAST');
@@ -124,6 +170,7 @@ export default function Page3_Spelers({ controller, currentUser }) {
               style={styles.addIconBtn}
               onPress={() => {
                 setNewName('');
+                setNewStartPassword('');
                 setNewType('VAST');
                 setAddModalVisible(true);
               }}
@@ -300,7 +347,7 @@ export default function Page3_Spelers({ controller, currentUser }) {
                   numberOfLines={2}
                 />
 
-                {/* Alleen zichtbaar voor de ingelogde gebruiker zelf */}
+                {/* Eigen wachtwoord wijzigen: alleen voor de ingelogde gebruiker zelf */}
                 {isSelf && (
                   <View style={styles.passwordChangeSection}>
                     <View style={styles.passwordHeaderRow}>
@@ -309,11 +356,37 @@ export default function Page3_Spelers({ controller, currentUser }) {
                     </View>
                     <TextInput
                       style={styles.input}
-                      placeholder="Nieuw wachtwoord (leeg laten = ongewijzigd)"
+                      placeholder={`Nieuw wachtwoord, min. ${MIN_PASSWORD_LENGTH} tekens (leeg = ongewijzigd)`}
                       secureTextEntry
+                      autoCapitalize="none"
                       value={editNewPassword}
-                      onChangeText={setEditNewPassword}
+                      onChangeText={(t) => setEditNewPassword(sanitizePasswordInput(t))}
                     />
+                  </View>
+                )}
+
+                {/* Admin: wachtwoord instellen voor een andere vaste speler */}
+                {isAdmin && !isSelf && editingPlayer?.type === 'VAST' && (
+                  <View style={styles.passwordChangeSection}>
+                    <View style={styles.passwordHeaderRow}>
+                      <Feather name="key" size={12} color="#2563EB" />
+                      <Text style={styles.passwordSectionTitle}>Wachtwoord instellen</Text>
+                    </View>
+                    <TextInput
+                      style={styles.input}
+                      placeholder={`Nieuw wachtwoord, min. ${MIN_PASSWORD_LENGTH} tekens`}
+                      secureTextEntry
+                      autoCapitalize="none"
+                      value={editNewPassword}
+                      onChangeText={(t) => setEditNewPassword(sanitizePasswordInput(t))}
+                    />
+                    <TouchableOpacity
+                      style={[styles.saveBtn, { marginTop: 8 }, busy && { opacity: 0.6 }]}
+                      onPress={handleSetPassword}
+                      disabled={busy}
+                    >
+                      <Text style={styles.saveBtnText}>Wachtwoord instellen</Text>
+                    </TouchableOpacity>
                   </View>
                 )}
               </View>
@@ -386,9 +459,27 @@ export default function Page3_Spelers({ controller, currentUser }) {
                   </Text>
                 </TouchableOpacity>
               </View>
+
+              {newType === 'VAST' && (
+                <>
+                  <Text style={styles.label}>Startwachtwoord</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder={`Minimaal ${MIN_PASSWORD_LENGTH} tekens`}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    value={newStartPassword}
+                    onChangeText={(t) => setNewStartPassword(sanitizePasswordInput(t))}
+                  />
+                </>
+              )}
             </View>
 
-            <TouchableOpacity style={styles.saveBtn} onPress={handleAddSubmit}>
+            <TouchableOpacity
+              style={[styles.saveBtn, busy && { opacity: 0.6 }]}
+              onPress={handleAddSubmit}
+              disabled={busy}
+            >
               <Text style={styles.saveBtnText}>Speler Toevoegen</Text>
             </TouchableOpacity>
           </View>
