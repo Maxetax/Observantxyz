@@ -5,6 +5,7 @@
 // Files: index.ts, handler.ts, rules.ts (all three in this function).
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { handleMigrateLogin, type PlayerRow } from './handler.ts';
+import { linkFields } from './rules.ts';
 
 const admin = createClient(
   Deno.env.get('SUPABASE_URL')!,
@@ -55,12 +56,28 @@ Deno.serve(async (req) => {
         return { id: data.user.id };
       },
       linkPlayer: async (id, authUserId) => {
-        const { error } = await admin
+        const { data, error } = await admin
           .from('players')
-          .update({ auth_user_id: authUserId, password_hash: null, failed_login_attempts: 0, locked_until: null })
+          .update(linkFields(authUserId))
           .eq('id', id)
-          .is('auth_user_id', null);
+          .is('auth_user_id', null)
+          .select('id');
         if (error) console.error('migrate-login: link failed:', error.message);
+        return !error && (data ?? []).length === 1;
+      },
+      findAuthUserByEmail: async (email) => {
+        const { data, error } = await admin.rpc('auth_user_id_for_email', { p_email: email });
+        if (error) throw error;
+        return (data as string | null) ?? null;
+      },
+      isAuthUserLinked: async (authUserId) => {
+        const { count, error } = await admin.from('players').select('id', { count: 'exact', head: true }).eq('auth_user_id', authUserId);
+        if (error) throw error;
+        return (count ?? 0) > 0;
+      },
+      updatePassword: async (authUserId, password) => {
+        const { error } = await admin.auth.admin.updateUserById(authUserId, { password });
+        if (error) console.error('migrate-login: updateUserById failed:', error.message);
         return !error;
       },
       deleteAuthUser: async (authUserId) => {

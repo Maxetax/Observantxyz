@@ -56,6 +56,14 @@ begin
   end if;
 end $$;
 
+do $$
+declare denied boolean := false;
+begin
+  begin perform public.auth_user_id_for_email('t-player@apollo.invalid');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'FAIL: anon can look up auth users by email'; end if;
+end $$;
+
 reset role;
 
 -- ---------- regular player ----------
@@ -74,6 +82,11 @@ begin
     begin execute 'select password_hash from public.players'; exception when insufficient_privilege then denied := true; end;
     if not denied then raise exception 'FAIL: player can read password_hash'; end if;
   end if;
+
+  begin perform public.auth_user_id_for_email('t-admin@apollo.invalid');
+  exception when insufficient_privilege then denied := true; end;
+  if not denied then raise exception 'FAIL: player can look up auth users by email'; end if;
+  denied := false;
 
   update public.players set phone = '0600000000' where id = 't-player';
   get diagnostics n = row_count;

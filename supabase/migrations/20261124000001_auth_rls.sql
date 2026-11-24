@@ -64,6 +64,17 @@ as $$
     and p.active is true
 $$;
 
+-- Server functions only: find a login by its hidden email, to recover from an
+-- earlier move-over that created the login but died before linking it.
+create or replace function public.auth_user_id_for_email(p_email text)
+returns uuid
+language sql stable security definer set search_path = ''
+as $$
+  select u.id from auth.users u where lower(u.email) = lower(p_email)
+$$;
+revoke all on function public.auth_user_id_for_email(text) from public, anon, authenticated;
+grant execute on function public.auth_user_id_for_email(text) to service_role;
+
 revoke all on function public.current_player_id() from public, anon;
 revoke all on function public.is_admin() from public, anon;
 revoke all on function public.login_email(text) from public;

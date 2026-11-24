@@ -10,7 +10,8 @@ export type AdminDeps = {
   isAuthUserLinked: (authUserId: string) => Promise<boolean>;
   updatePassword: (authUserId: string, password: string) => Promise<boolean>;
   createAuthUser: (email: string, password: string) => Promise<{ id: string } | { error: string }>;
-  // Sets auth_user_id and clears password_hash. Returns false on failure.
+  findAuthUserByEmail: (email: string) => Promise<string | null>;
+  // Sets auth_user_id (see rules.ts linkFields). False unless exactly one row was linked.
   linkPlayer: (playerId: string, authUserId: string) => Promise<boolean>;
   deleteAuthUser: (authUserId: string) => Promise<void>;
 };
@@ -41,14 +42,30 @@ export async function handleAdminAccount(body: unknown, callerAuthId: string | n
     return (await deps.updatePassword(target.auth_user_id, req.password)) ? reply('ok') : reply('error', 500);
   }
 
-  const created = await deps.createAuthUser(hiddenEmail(target.id), req.password);
-  if ('error' in created) {
-    console.error('admin-account: createUser failed:', created.error);
-    return reply('error', 500);
-  }
-  if (!(await deps.linkPlayer(target.id, created.id))) {
-    await deps.deleteAuthUser(created.id);
+  const login = await createOrReuseLogin(deps, hiddenEmail(target.id), req.password);
+  if (!login) return reply('error', 500);
+  if (!(await deps.linkPlayer(target.id, login.id))) {
+    // A login we just created is removed; a reused one is left for the next attempt.
+    if (login.created) await deps.deleteAuthUser(login.id);
     return reply('error', 500);
   }
   return reply('ok');
+}
+
+// Same as migrate-login/handler.ts (dashboard functions can't share files):
+// create the login, or reuse an unlinked one left by an earlier failed attempt.
+async function createOrReuseLogin(
+  deps: AdminDeps,
+  email: string,
+  password: string,
+): Promise<{ id: string; created: boolean } | null> {
+  const created = await deps.createAuthUser(email, password);
+  if (!('error' in created)) return { id: created.id, created: true };
+
+  const existing = await deps.findAuthUserByEmail(email);
+  if (!existing || (await deps.isAuthUserLinked(existing))) {
+    console.error('admin-account: createUser failed:', created.error);
+    return null;
+  }
+  return (await deps.updatePassword(existing, password)) ? { id: existing, created: false } : null;
 }

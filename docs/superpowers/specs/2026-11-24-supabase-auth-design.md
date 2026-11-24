@@ -124,7 +124,7 @@ optional `newPassword`.
    `needs_new_password`.
 4. Create the auth user (`<id>@apollo.invalid`, email confirmed) with
    `newPassword` if given, otherwise the old password. Set
-   `players.auth_user_id` and clear `password_hash`.
+   `players.auth_user_id`. `password_hash` is kept until migration 2 drops it, so the emergency rollback restores old passwords (changed after final review). If an earlier attempt left an unlinked login with the same email, reuse it.
 5. The app then signs in normally.
 
 Basic brute-force guard: count failed attempts per player and refuse for
@@ -210,7 +210,7 @@ The live database holds the **real team** (confirmed by the user). So:
 
 - No step may delete or rewrite existing player or match rows. Schema
   changes only add columns, indexes, functions and policies. The only data
-  writes are setting `auth_user_id` and clearing `password_hash`, both done
+  writes are setting `auth_user_id` and the lockout counters, both done
   per player during the move-over.
 - Each migration file runs in a single transaction and ends with
   verification queries (admin count, duplicate names, policy list). If a check

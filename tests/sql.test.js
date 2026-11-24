@@ -27,6 +27,16 @@ test('migration applies and all access-rule tests pass', async () => {
   assert.equal(lastResult(results), 'ALL AUTH RLS TESTS PASSED');
 });
 
+test('service role can look up a login id by hidden email (case-insensitive)', async () => {
+  const db = await freshDb("insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000e5', 'p-2@apollo.invalid');");
+  await db.exec(MIGRATION);
+  await db.exec('set role service_role');
+  const hit = await db.query("select public.auth_user_id_for_email('P-2@apollo.invalid') as id");
+  assert.equal(hit.rows[0].id, '00000000-0000-0000-0000-0000000000e5');
+  const miss = await db.query("select public.auth_user_id_for_email('p-404@apollo.invalid') as id");
+  assert.equal(miss.rows[0].id, null);
+});
+
 test('migration keeps existing player and match rows unchanged', async () => {
   const db = await freshDb();
   const before = await db.query('select id, name, type, active, is_admin, password_hash from players order by id');

@@ -99,12 +99,33 @@ password.
   migrate-login → Logs**. If it says the email address is invalid, tell
   Claude: the hidden email domain needs to change.
 
+## 6b. Set passwords for everyone still on `123` (before release)
+
+`123` was everyone's default, and the old hashes were readable by anyone. So
+whoever does a player's first login with `123` gets to choose that player's
+new password, and could lock the real player out. Close that before handing
+out the build:
+
+```sql
+select name from public.players
+where type = 'VAST' and active and auth_user_id is null
+  and password_hash = 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3'
+order by name;
+```
+
+For each name: in the new app, **Spelers → Aanpassen → Wachtwoord instellen**,
+then give that player their password privately (in person or by direct
+message). Run the query again: **expected: no rows**.
+
+Ask everyone else to change their password after their first login (Spelers →
+Aanpassen on their own profile). Their old password's hash was public too.
+
 ## 7. Release the build to the team
 
 Tell everyone:
-- update the app, then log in with their **name and current password**;
-- anyone still on the default password (`123`) has to choose a new one of at
-  least 6 characters;
+- update the app, then log in with their **name and current password** (or the
+  one the admin gave them in step 6b);
+- anyone whose password is shorter than 6 characters has to choose a new one;
 - forgot it? Ask an admin to set a new one (Spelers → Aanpassen →
   Wachtwoord instellen).
 
@@ -131,7 +152,17 @@ When step 8's query returns no rows: SQL Editor → paste
 
 ## Emergency undo
 
-If something is badly wrong after step 3: SQL Editor → run
+If something is badly wrong after step 3 (and **before step 9**): SQL Editor → run
 `20261124000001_auth_rls_rollback.sql`. That restores the old open access, so
 old app builds work again. **It also re-opens the security hole**, so treat it
 as a stopgap only. No data is lost either way.
+
+- In the old app, everyone logs in with their **old** password again. That
+  includes players who chose a new one in the new app: their old one (often
+  `123`) is what the old app knows.
+- After step 9 the rollback no longer works: old builds need the
+  `password_hash` column, which is gone by then. Restore from the step-1
+  backup instead.
+- If a player's first login ever fails with "Er is een fout opgetreden", just
+  try again. A half-finished attempt is picked up automatically. If it keeps
+  failing, check **Edge Functions → migrate-login → Logs**.

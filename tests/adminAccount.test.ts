@@ -41,14 +41,15 @@ test('both rule copies agree', () => {
 
 type Player = { id: string; type: string; active: boolean; is_admin: boolean; auth_user_id: string | null };
 
-function fake(players: Player[], opts: { linkOk?: boolean; linkedIds?: string[] } = {}) {
+function fake(players: Player[], opts: { linkOk?: boolean; linkedIds?: string[]; createError?: boolean; strayId?: string | null } = {}) {
   const calls: Record<string, unknown[]> = { updatePassword: [], createAuthUser: [], linkPlayer: [], deleteAuthUser: [] };
   const deps: AdminDeps = {
     getPlayerByAuthId: async (id) => players.find((p) => p.auth_user_id === id) ?? null,
     getPlayer: async (id) => players.find((p) => p.id === id) ?? null,
     isAuthUserLinked: async (id) => (opts.linkedIds ?? players.map((p) => p.auth_user_id)).includes(id),
     updatePassword: async (...a) => { calls.updatePassword.push(a); return true; },
-    createAuthUser: async (...a) => { calls.createAuthUser.push(a); return { id: 'new-uuid' }; },
+    createAuthUser: async (...a) => { calls.createAuthUser.push(a); return opts.createError ? { error: 'already registered' } : { id: 'new-uuid' }; },
+    findAuthUserByEmail: async () => opts.strayId ?? null,
     linkPlayer: async (...a) => { calls.linkPlayer.push(a); return opts.linkOk ?? true; },
     deleteAuthUser: async (id) => { calls.deleteAuthUser.push(id); },
   };
@@ -133,4 +134,27 @@ test('remove deletes an orphaned login', async () => {
   const r = await handleAdminAccount({ action: 'remove', authUserId: UUID }, 'admin-uuid', deps);
   assert.deepEqual(r.body, { status: 'ok' });
   assert.deepEqual(calls.deleteAuthUser, [UUID]);
+});
+
+test('set-password reuses a stray unlinked login instead of failing', async () => {
+  const { deps, calls } = fake(team(), { createError: true, strayId: 'stray-uuid' });
+  const r = await handleAdminAccount(setPw('p-3'), 'admin-uuid', deps);
+  assert.deepEqual(r.body, { status: 'ok' });
+  assert.deepEqual(calls.updatePassword, [['stray-uuid', 'nieuw123']]);
+  assert.deepEqual(calls.linkPlayer, [['p-3', 'stray-uuid']]);
+});
+
+test('set-password never takes over a login linked to another player', async () => {
+  const { deps, calls } = fake(team(), { createError: true, strayId: 'player-uuid' });
+  const r = await handleAdminAccount(setPw('p-3'), 'admin-uuid', deps);
+  assert.deepEqual(r, { httpStatus: 500, body: { status: 'error' } });
+  assert.equal(calls.linkPlayer.length, 0);
+});
+
+test('linking a player keeps the old hash (emergency rollback restores old passwords)', () => {
+  for (const rules of [admin, migrate]) {
+    const fields = rules.linkFields('u-1');
+    assert.deepEqual(fields, { auth_user_id: 'u-1', failed_login_attempts: 0, locked_until: null });
+    assert.ok(!('password_hash' in fields));
+  }
 });

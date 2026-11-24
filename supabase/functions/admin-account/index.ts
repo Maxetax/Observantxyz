@@ -4,6 +4,7 @@
 // Deploy with "Verify JWT" ON. Files: index.ts, handler.ts, rules.ts.
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { handleAdminAccount, type PlayerInfo } from './handler.ts';
+import { linkFields } from './rules.ts';
 
 const admin = createClient(
   Deno.env.get('SUPABASE_URL')!,
@@ -58,13 +59,19 @@ Deno.serve(async (req) => {
         return { id: data.user.id };
       },
       linkPlayer: async (playerId, authUserId) => {
-        const { error } = await admin
+        const { data, error } = await admin
           .from('players')
-          .update({ auth_user_id: authUserId, password_hash: null, failed_login_attempts: 0, locked_until: null })
+          .update(linkFields(authUserId))
           .eq('id', playerId)
-          .is('auth_user_id', null);
+          .is('auth_user_id', null)
+          .select('id');
         if (error) console.error('admin-account: link failed:', error.message);
-        return !error;
+        return !error && (data ?? []).length === 1;
+      },
+      findAuthUserByEmail: async (email) => {
+        const { data, error } = await admin.rpc('auth_user_id_for_email', { p_email: email });
+        if (error) throw error;
+        return (data as string | null) ?? null;
       },
       deleteAuthUser: async (authUserId) => {
         const { error } = await admin.auth.admin.deleteUser(authUserId);

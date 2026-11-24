@@ -18,6 +18,7 @@ drop policy if exists matches_delete on public.matches;
 drop trigger if exists players_protect_columns on public.players;
 drop function if exists public.players_protect_columns();
 drop function if exists public.login_email(text);
+drop function if exists public.auth_user_id_for_email(text);
 drop function if exists public.is_admin();
 drop function if exists public.current_player_id();
 drop index if exists public.players_name_unique;

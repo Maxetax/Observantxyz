@@ -37,3 +37,13 @@ export function parseAdminRequest(body: unknown): AdminRequest {
 
   return { error: 'invalid_request' };
 }
+
+// Columns set when a player is linked to their login. password_hash is kept on
+// purpose: if the emergency rollback is ever run, old app builds then still see
+// each player's old password (not the old app's "missing = 123" fallback).
+// Migration 20261124000002 drops the column once everyone has moved over.
+export const linkFields = (authUserId: string) => ({
+  auth_user_id: authUserId,
+  failed_login_attempts: 0,
+  locked_until: null,
+});

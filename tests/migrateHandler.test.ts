@@ -5,9 +5,15 @@ import { LEGACY_DEFAULT_HASH, sha256Hex } from '../supabase/functions/migrate-lo
 
 const now = new Date('2026-11-24T12:00:00.000Z');
 
-function fakeDeps(player: PlayerRow | null, opts: { createError?: boolean; linkOk?: boolean } = {}) {
-  const calls: Record<string, unknown[]> = { saveCounters: [], createAuthUser: [], linkPlayer: [], deleteAuthUser: [], findPlayer: [] };
+function fakeDeps(
+  player: PlayerRow | null,
+  opts: { createError?: boolean; linkOk?: boolean; strayId?: string | null; strayLinked?: boolean } = {},
+) {
+  const calls: Record<string, unknown[]> = { saveCounters: [], createAuthUser: [], linkPlayer: [], deleteAuthUser: [], findPlayer: [], updatePassword: [] };
   const deps: MigrateDeps = {
+    findAuthUserByEmail: async () => opts.strayId ?? null,
+    isAuthUserLinked: async () => opts.strayLinked ?? false,
+    updatePassword: async (...a) => { calls.updatePassword.push(a); return true; },
     now: () => now,
     findPlayer: async (name) => { calls.findPlayer.push(name); return player; },
     saveCounters: async (...a) => { calls.saveCounters.push(a); },
@@ -74,4 +80,27 @@ test('failed account creation reports an error', async () => {
   const r = await handleMigrateLogin({ name: 'Lars van Dijk', password: 'geheim1' }, deps);
   assert.deepEqual(r, { httpStatus: 500, body: { status: 'error' } });
   assert.equal(calls.linkPlayer.length, 0);
+});
+
+test('a stray unlinked login from an earlier failed attempt is reused', async () => {
+  const { deps, calls } = fakeDeps(await lars(), { createError: true, strayId: 'stray-uuid' });
+  const r = await handleMigrateLogin({ name: 'Lars van Dijk', password: 'geheim1' }, deps);
+  assert.deepEqual(r, { httpStatus: 200, body: { status: 'ok' } });
+  assert.deepEqual(calls.updatePassword, [['stray-uuid', 'geheim1']]);
+  assert.deepEqual(calls.linkPlayer, [['p-1', 'stray-uuid']]);
+  assert.equal(calls.deleteAuthUser.length, 0);
+});
+
+test('an existing login linked to another player is never taken over', async () => {
+  const { deps, calls } = fakeDeps(await lars(), { createError: true, strayId: 'other-uuid', strayLinked: true });
+  const r = await handleMigrateLogin({ name: 'Lars van Dijk', password: 'geheim1' }, deps);
+  assert.deepEqual(r, { httpStatus: 500, body: { status: 'error' } });
+  assert.equal(calls.updatePassword.length + calls.linkPlayer.length, 0);
+});
+
+test('reused stray login that then fails to link is left for a retry, not deleted', async () => {
+  const { deps, calls } = fakeDeps(await lars(), { createError: true, strayId: 'stray-uuid', linkOk: false });
+  const r = await handleMigrateLogin({ name: 'Lars van Dijk', password: 'geheim1' }, deps);
+  assert.deepEqual(r, { httpStatus: 500, body: { status: 'error' } });
+  assert.equal(calls.deleteAuthUser.length, 0);
 });
