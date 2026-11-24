@@ -13,47 +13,45 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useAppController } from '../controller/Controller';
 import { SubformRouter } from '../router/Router';
-import { getSavedUser, saveAuthUser } from '../controller/storage';
+import { clearLocalCache } from '../controller/storage';
+import { supabase } from '../controller/supabase';
 import Page0_Login from './pages/Page0_Login';
 
 export default function Landingpage() {
-  const controller = useAppController('Page1');
   const insets = useSafeAreaInsets();
-  const [currentUser, setCurrentUser] = useState(null);
-  const [authChecked, setAuthChecked] = useState(false);
+  const [session, setSession] = useState(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const controller = useAppController('Page1', session);
 
+  // The Supabase Auth session is the only source of truth for who is logged in.
   useEffect(() => {
-    const checkAuth = async () => {
-      const user = await getSavedUser();
-      setCurrentUser(user);
-      setAuthChecked(true);
-    };
-    checkAuth();
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data?.session ?? null);
+      setSessionChecked(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => sub?.subscription?.unsubscribe();
   }, []);
 
-  const handleLoginSuccess = async (user) => {
-    setCurrentUser(user);
-    await saveAuthUser(user);
-  };
-
   const handleLogout = async () => {
-    setCurrentUser(null);
-    await saveAuthUser(null);
+    await supabase.auth.signOut();
+    await clearLocalCache();
   };
 
-  // Live record of the logged-in player (the saved copy can be stale).
-  const livePlayer = currentUser
-    ? controller.players.find((p) => p.id === currentUser.id)
+  // The logged-in player's live record.
+  const currentUser = session
+    ? controller.players.find((p) => p.authUserId === session.user.id) ?? null
     : null;
 
   // Sign out a player who has been removed or deactivated since logging in.
+  const mustSignOut = !!session && controller.isLoaded && (!currentUser || !currentUser.active);
   useEffect(() => {
-    if (controller.isLoaded && currentUser && (!livePlayer || !livePlayer.active)) {
-      handleLogout();
-    }
-  }, [controller.isLoaded, currentUser, livePlayer]);
+    if (mustSignOut) handleLogout();
+  }, [mustSignOut]);
 
-  if (!authChecked || !controller.isLoaded) {
+  if (!sessionChecked || (session && (!controller.isLoaded || mustSignOut))) {
     return (
       <View style={[styles.screenContainer, styles.centered]}>
         <ActivityIndicator size="large" color="#2563EB" />
@@ -61,7 +59,7 @@ export default function Landingpage() {
     );
   }
 
-  if (!currentUser) {
+  if (!session) {
     return (
       <View
         style={[
@@ -75,10 +73,7 @@ export default function Landingpage() {
           },
         ]}
       >
-        <Page0_Login
-          players={controller.players}
-          onLoginSuccess={handleLoginSuccess}
-        />
+        <Page0_Login />
       </View>
     );
   }
@@ -113,12 +108,12 @@ export default function Landingpage() {
       <View style={styles.topUserBar}>
         <View style={styles.userBadge}>
           <Feather
-            name={livePlayer?.isAdmin ? 'shield' : 'user'}
+            name={currentUser?.isAdmin ? 'shield' : 'user'}
             size={12}
             color="#2563EB"
           />
-          <Text style={styles.userBadgeText}>{livePlayer?.name ?? currentUser?.name}</Text>
-          {livePlayer?.isAdmin && <Text style={styles.adminTinyTag}>(Admin)</Text>}
+          <Text style={styles.userBadgeText}>{currentUser?.name}</Text>
+          {currentUser?.isAdmin && <Text style={styles.adminTinyTag}>(Admin)</Text>}
         </View>
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Feather name="log-out" size={12} color="#DC2626" />

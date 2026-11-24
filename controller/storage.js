@@ -1,33 +1,34 @@
 // controller/storage.js
+// Reads and writes players/matches. Supabase is the source of truth; AsyncStorage
+// is only an offline cache for a logged-in player.
+//
+// Never use upsert: Postgres checks the INSERT policy on upsert even when it
+// ends up updating, and inserts are admin-only. Existing rows use update(),
+// new rows use insert().
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
+import { PLAYER_COLUMNS } from './columns';
 
-const STORAGE_KEY_PLAYERS = '@apollo_badminton_players_v7';
-const STORAGE_KEY_MATCHES = '@apollo_badminton_matches_v7';
-const STORAGE_KEY_AUTH_USER = '@apollo_auth_current_user_v2';
+export { PLAYER_COLUMNS };
 
-const DEFAULT_HASH = 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3';
-
-const INITIAL_PLAYERS = [
-  { id: 'p-1', name: 'Lars van Dijk', type: 'VAST', active: true, isAdmin: true, passwordHash: DEFAULT_HASH, phone: '06-12345678', address: 'Kerkstraat 1, Utrecht', notes: 'Aanvoerder' },
-  { id: 'p-2', name: 'Daan Meijer', type: 'VAST', active: true, isAdmin: false, passwordHash: DEFAULT_HASH, phone: '', address: '', notes: '' },
-  { id: 'p-3', name: 'Bram Bakker', type: 'VAST', active: true, isAdmin: false, passwordHash: DEFAULT_HASH, phone: '', address: '', notes: '' },
-  { id: 'p-4', name: 'Sven de Jong', type: 'VAST', active: true, isAdmin: false, passwordHash: DEFAULT_HASH, phone: '', address: '', notes: '' },
-  { id: 'p-5', name: 'Thijs Visser', type: 'WISSEL', active: true, isAdmin: false, passwordHash: null, phone: '', address: '', notes: '' },
-  { id: 'p-6', name: 'Jasper Smit', type: 'WISSEL', active: true, isAdmin: false, passwordHash: null, phone: '', address: '', notes: '' },
+const STORAGE_KEY_PLAYERS = '@apollo_badminton_players_v8';
+const STORAGE_KEY_MATCHES = '@apollo_badminton_matches_v8';
+// Keys used by older app versions (contained password hashes / cached user).
+const LEGACY_KEYS = [
+  '@apollo_badminton_players_v7',
+  '@apollo_badminton_matches_v7',
+  '@apollo_auth_current_user_v2',
 ];
 
-const formatPlayerForDb = (p) => ({
-  id: p.id,
+// Editable player fields (no id/created_at: those are never updated).
+const playerFieldsForDb = (p) => ({
   name: p.name,
   type: p.type,
   active: p.active ?? true,
-  is_admin: p.isAdmin ?? p.is_admin ?? false,
-  password_hash: p.passwordHash || p.password_hash || DEFAULT_HASH,
+  is_admin: p.isAdmin ?? false,
   phone: p.phone || '',
   address: p.address || '',
   notes: p.notes || '',
-  created_at: p.createdAt || p.created_at || new Date().toISOString(),
 });
 
 const formatPlayerFromDb = (p) => ({
@@ -35,162 +36,170 @@ const formatPlayerFromDb = (p) => ({
   name: p.name,
   type: p.type,
   active: p.active ?? true,
-  isAdmin: p.is_admin ?? p.isAdmin ?? false,
-  passwordHash: p.password_hash || p.passwordHash || DEFAULT_HASH,
+  isAdmin: p.is_admin ?? false,
   phone: p.phone || '',
   address: p.address || '',
   notes: p.notes || '',
-  createdAt: p.created_at || p.createdAt || new Date().toISOString(),
+  createdAt: p.created_at,
+  authUserId: p.auth_user_id ?? null,
 });
 
-export const getStoredPlayers = async () => {
+const matchFieldsForDb = (m) => ({
+  date: m.date,
+  opponent: m.opponent,
+  location: m.location,
+  is_home: m.isHome,
+  status: m.status,
+  selected_player_ids: m.selectedPlayerIds,
+  declined_player_ids: m.declinedPlayerIds,
+  rounds: m.rounds,
+  final_result: m.finalResult,
+});
+
+const formatMatchFromDb = (m) => ({
+  id: m.id,
+  date: m.date,
+  opponent: m.opponent,
+  location: m.location,
+  isHome: m.is_home,
+  status: m.status,
+  selectedPlayerIds: m.selected_player_ids ?? [],
+  declinedPlayerIds: m.declined_player_ids ?? [],
+  rounds: m.rounds ?? [],
+  finalResult: m.final_result ?? { homeScore: 0, awayScore: 0, outcome: 'PENDING' },
+});
+
+const errorMessage = (err) => err?.message || String(err);
+
+// Update each changed row; a row the database refused (0 rows back) counts as an error.
+const updateRows = async (table, rows) => {
+  for (const { id, fields } of rows) {
+    const { data, error } = await supabase.from(table).update(fields).eq('id', id).select('id');
+    if (error) return { error: errorMessage(error) };
+    if (!data || data.length === 0) return { error: 'not allowed' };
+  }
+  return {};
+};
+
+const cache = (key, value) => AsyncStorage.setItem(key, JSON.stringify(value)).catch(() => {});
+
+const readCache = async (key) => {
   try {
-    if (supabase) {
-      const { data, error } = await supabase
-        .from('players')
-        .select('*')
-        .order('created_at', { ascending: true });
-
-      if (!error && data && data.length > 0) {
-        return data.map(formatPlayerFromDb);
-      }
-    }
-
-    const local = await AsyncStorage.getItem(STORAGE_KEY_PLAYERS);
-    if (local !== null) return JSON.parse(local);
-
-    await AsyncStorage.setItem(STORAGE_KEY_PLAYERS, JSON.stringify(INITIAL_PLAYERS));
-    if (supabase) {
-      await supabase.from('players').upsert(INITIAL_PLAYERS.map(formatPlayerForDb));
-    }
-    return INITIAL_PLAYERS;
-  } catch (err) {
-    return INITIAL_PLAYERS;
+    const local = await AsyncStorage.getItem(key);
+    return local ? JSON.parse(local) : [];
+  } catch {
+    return [];
   }
 };
 
-// `changed` = only the players that were actually modified. Upserting the whole
-// list would overwrite other users' concurrent edits with this device's stale copy.
-export const savePlayers = async (players, changed = players) => {
+// ---------- players ----------
+
+export const getStoredPlayers = async () => {
   try {
-    await AsyncStorage.setItem(STORAGE_KEY_PLAYERS, JSON.stringify(players));
-    if (supabase && changed.length > 0) {
-      const { error } = await supabase.from('players').upsert(changed.map(formatPlayerForDb));
-      if (error) console.error('Save players error:', error.message);
+    const { data, error } = await supabase
+      .from('players')
+      .select(PLAYER_COLUMNS)
+      .order('created_at', { ascending: true });
+    if (!error && data) {
+      const players = data.map(formatPlayerFromDb);
+      await cache(STORAGE_KEY_PLAYERS, players);
+      return players;
     }
+  } catch {
+    // offline: fall through to cache
+  }
+  return readCache(STORAGE_KEY_PLAYERS);
+};
+
+// `changed`: only the players that were modified (never the whole list).
+export const savePlayers = async (players, changed = []) => {
+  await cache(STORAGE_KEY_PLAYERS, players);
+  try {
+    return await updateRows('players', changed.map((p) => ({ id: p.id, fields: playerFieldsForDb(p) })));
   } catch (err) {
-    console.error('Save players error:', err);
+    return { error: errorMessage(err) };
+  }
+};
+
+export const insertPlayer = async (player) => {
+  try {
+    const { error } = await supabase
+      .from('players')
+      .insert({ id: player.id, created_at: player.createdAt, ...playerFieldsForDb(player) });
+    return error ? { error: errorMessage(error) } : {};
+  } catch (err) {
+    return { error: errorMessage(err) };
   }
 };
 
 export const deleteStoredPlayer = async (id) => {
   try {
-    const local = await AsyncStorage.getItem(STORAGE_KEY_PLAYERS);
-    if (local !== null) {
-      const filtered = JSON.parse(local).filter((p) => p.id !== id);
-      await AsyncStorage.setItem(STORAGE_KEY_PLAYERS, JSON.stringify(filtered));
-    }
-    if (supabase) {
-      await supabase.from('players').delete().eq('id', id);
-    }
+    const { data, error } = await supabase.from('players').delete().eq('id', id).select('id');
+    if (error) return { error: errorMessage(error) };
+    if (!data || data.length === 0) return { error: 'not allowed' };
+    return {};
   } catch (err) {
-    console.error('Delete player error:', err);
+    return { error: errorMessage(err) };
   }
 };
+
+// ---------- matches ----------
 
 export const getStoredMatches = async () => {
   try {
-    if (supabase) {
-      const { data, error } = await supabase
-        .from('matches')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      // A successful (even empty) response is the truth; only fall back to cache on error/offline.
-      if (!error && data) {
-        const mapped = data.map((m) => ({
-          id: m.id,
-          date: m.date,
-          opponent: m.opponent,
-          location: m.location,
-          isHome: m.is_home ?? m.isHome,
-          status: m.status,
-          selectedPlayerIds: m.selected_player_ids ?? m.selectedPlayerIds ?? [],
-          declinedPlayerIds: m.declined_player_ids ?? m.declinedPlayerIds ?? [],
-          rounds: m.rounds ?? [],
-          finalResult: m.final_result ?? m.finalResult ?? { homeScore: 0, awayScore: 0, outcome: 'PENDING' },
-        }));
-        await AsyncStorage.setItem(STORAGE_KEY_MATCHES, JSON.stringify(mapped));
-        return mapped;
-      }
+    const { data, error } = await supabase
+      .from('matches')
+      .select('*')
+      .order('created_at', { ascending: false });
+    // A successful (even empty) response is the truth; only fall back to cache on error/offline.
+    if (!error && data) {
+      const matches = data.map(formatMatchFromDb);
+      await cache(STORAGE_KEY_MATCHES, matches);
+      return matches;
     }
+  } catch {
+    // offline: fall through to cache
+  }
+  return readCache(STORAGE_KEY_MATCHES);
+};
 
-    const local = await AsyncStorage.getItem(STORAGE_KEY_MATCHES);
-    if (local !== null) return JSON.parse(local);
-
-    return [];
+// `changed`: only the matches that were modified (never the whole list).
+export const saveMatches = async (matches, changed = []) => {
+  await cache(STORAGE_KEY_MATCHES, matches);
+  try {
+    return await updateRows('matches', changed.map((m) => ({ id: m.id, fields: matchFieldsForDb(m) })));
   } catch (err) {
-    return [];
+    return { error: errorMessage(err) };
   }
 };
 
-// `changed` = only the matches that were actually modified (see savePlayers).
-export const saveMatches = async (matches, changed = matches) => {
+export const insertMatch = async (match) => {
   try {
-    await AsyncStorage.setItem(STORAGE_KEY_MATCHES, JSON.stringify(matches));
-    if (supabase && changed.length > 0) {
-      const records = changed.map((m) => ({
-        id: m.id,
-        date: m.date,
-        opponent: m.opponent,
-        location: m.location,
-        is_home: m.isHome,
-        status: m.status,
-        selected_player_ids: m.selectedPlayerIds,
-        declined_player_ids: m.declinedPlayerIds,
-        rounds: m.rounds,
-        final_result: m.finalResult,
-      }));
-      const { error } = await supabase.from('matches').upsert(records);
-      if (error) console.error('Save matches error:', error.message);
-    }
+    const { error } = await supabase.from('matches').insert({ id: match.id, ...matchFieldsForDb(match) });
+    return error ? { error: errorMessage(error) } : {};
   } catch (err) {
-    console.error('Save matches error:', err);
+    return { error: errorMessage(err) };
   }
 };
 
 export const deleteStoredMatch = async (id) => {
   try {
-    const local = await AsyncStorage.getItem(STORAGE_KEY_MATCHES);
-    if (local !== null) {
-      const filtered = JSON.parse(local).filter((m) => m.id !== id);
-      await AsyncStorage.setItem(STORAGE_KEY_MATCHES, JSON.stringify(filtered));
-    }
-    if (supabase) {
-      await supabase.from('matches').delete().eq('id', id);
-    }
+    const { data, error } = await supabase.from('matches').delete().eq('id', id).select('id');
+    if (error) return { error: errorMessage(error) };
+    if (!data || data.length === 0) return { error: 'not allowed' };
+    return {};
   } catch (err) {
-    console.error('Delete match error:', err);
+    return { error: errorMessage(err) };
   }
 };
 
-export const getSavedUser = async () => {
+// ---------- session ----------
+
+// Called on logout: nothing from the team stays on the device.
+export const clearLocalCache = async () => {
   try {
-    const data = await AsyncStorage.getItem(STORAGE_KEY_AUTH_USER);
-    return data ? JSON.parse(data) : null;
+    await AsyncStorage.multiRemove([STORAGE_KEY_PLAYERS, STORAGE_KEY_MATCHES, ...LEGACY_KEYS]);
   } catch {
-    return null;
-  }
-};
-
-export const saveAuthUser = async (user) => {
-  try {
-    if (user) {
-      await AsyncStorage.setItem(STORAGE_KEY_AUTH_USER, JSON.stringify(user));
-    } else {
-      await AsyncStorage.removeItem(STORAGE_KEY_AUTH_USER);
-    }
-  } catch (e) {
-    console.error('Auth save error:', e);
+    // ignore
   }
 };

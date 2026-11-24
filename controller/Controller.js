@@ -1,12 +1,14 @@
 // controller/Controller.js
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Alert, Platform } from 'react-native';
 import { supabase } from './supabase';
 import {
   getStoredPlayers,
   savePlayers,
+  insertPlayer,
   getStoredMatches,
   saveMatches,
+  insertMatch,
   deleteStoredPlayer,
   deleteStoredMatch,
 } from './storage';
@@ -20,54 +22,76 @@ import {
 const sortMatchesByDate = (list) =>
   [...list].sort((a, b) => parseMatchDate(b.date) - parseMatchDate(a.date));
 
-export const useAppController = (initialRoute = 'Page1') => {
+const SAVE_FAILED = 'Opslaan mislukt. Controleer je verbinding of rechten.';
+
+export const showMessage = (message) => {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined') window.alert(message);
+  } else {
+    Alert.alert('Apollo', message);
+  }
+};
+
+// `session`: the Supabase Auth session. Data is only loaded while it is set.
+export const useAppController = (initialRoute = 'Page1', session = null) => {
   const [currentRoute, setCurrentRoute] = useState(initialRoute);
   const [players, setPlayers] = useState([]);
   const [matches, setMatches] = useState([]);
   const [activeMatchId, setActiveMatchId] = useState(null);
   const [isLoaded, setIsLoaded] = useState(false);
+  const mounted = useRef(true);
+  const userId = session?.user?.id ?? null;
+
+  const reload = async () => {
+    const [p, m] = await Promise.all([getStoredPlayers(), getStoredMatches()]);
+    if (mounted.current) {
+      setPlayers(p);
+      setMatches(sortMatchesByDate(m));
+      setIsLoaded(true);
+    }
+  };
+
+  // After a refused or failed save, tell the user and show the database's state again.
+  const handleSaveResult = (result) => {
+    if (result?.error) {
+      showMessage(SAVE_FAILED);
+      reload();
+    }
+    return result;
+  };
 
   useEffect(() => {
-    let isMounted = true;
-
-    const loadAll = async () => {
-      const [p, m] = await Promise.all([getStoredPlayers(), getStoredMatches()]);
-      if (isMounted) {
-        setPlayers(p);
-        setMatches(sortMatchesByDate(m));
-        setIsLoaded(true);
-      }
-    };
-    loadAll();
-
-    let channel;
-    if (supabase) {
-      channel = supabase
-        .channel('realtime_apollo_cascade_sync')
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'matches' },
-          async () => {
-            const refreshedMatches = await getStoredMatches();
-            if (isMounted) setMatches(sortMatchesByDate(refreshedMatches));
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'players' },
-          async () => {
-            const refreshedPlayers = await getStoredPlayers();
-            if (isMounted) setPlayers(refreshedPlayers);
-          }
-        )
-        .subscribe();
+    mounted.current = true;
+    if (!userId) {
+      setPlayers([]);
+      setMatches([]);
+      setActiveMatchId(null);
+      setCurrentRoute(initialRoute);
+      setIsLoaded(false);
+      return () => {
+        mounted.current = false;
+      };
     }
 
+    reload();
+
+    const channel = supabase
+      .channel('realtime_apollo_cascade_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' }, async () => {
+        const refreshed = await getStoredMatches();
+        if (mounted.current) setMatches(sortMatchesByDate(refreshed));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'players' }, async () => {
+        const refreshed = await getStoredPlayers();
+        if (mounted.current) setPlayers(refreshed);
+      })
+      .subscribe();
+
     return () => {
-      isMounted = false;
-      if (channel && supabase) supabase.removeChannel(channel);
+      mounted.current = false;
+      supabase.removeChannel(channel);
     };
-  }, []);
+  }, [userId]);
 
   const stats = useMemo(() => computeAllStats(players, matches), [players, matches]);
 
@@ -90,7 +114,7 @@ export const useAppController = (initialRoute = 'Page1') => {
         changed = transform(p);
         return changed;
       });
-      if (changed) savePlayers(updated, [changed]);
+      if (changed) savePlayers(updated, [changed]).then(handleSaveResult);
       return updated;
     });
   };
@@ -103,7 +127,7 @@ export const useAppController = (initialRoute = 'Page1') => {
         changed = transform(m);
         return changed;
       });
-      if (changed) saveMatches(updated, [changed]);
+      if (changed) saveMatches(updated, [changed]).then(handleSaveResult);
       return updated;
     });
   };
@@ -138,14 +162,12 @@ export const useAppController = (initialRoute = 'Page1') => {
       name: name.trim(),
       type,
       active: true,
+      isAdmin: false,
       createdAt: new Date().toISOString(),
     };
 
-    setPlayers((prev) => {
-      const updated = [...prev, newP];
-      savePlayers(updated, [newP]);
-      return updated;
-    });
+    setPlayers((prev) => [...prev, newP]);
+    insertPlayer(newP).then(handleSaveResult);
   };
 
   const togglePlayerActive = (id) => {
@@ -158,12 +180,8 @@ export const useAppController = (initialRoute = 'Page1') => {
       'Speler definitief verwijderen',
       'Deze speler wordt ook direct uit alle wedstrijdopstellingen en aanwezigheidslijsten verwijderd. Weet je het zeker?',
       () => {
-        setPlayers((prevPlayers) => {
-          const updatedPlayers = prevPlayers.filter((p) => p.id !== id);
-          savePlayers(updatedPlayers, []);
-          deleteStoredPlayer(id);
-          return updatedPlayers;
-        });
+        setPlayers((prevPlayers) => prevPlayers.filter((p) => p.id !== id));
+        deleteStoredPlayer(id).then(handleSaveResult);
 
         setMatches((prevMatches) => {
           const changedMatches = [];
@@ -192,7 +210,7 @@ export const useAppController = (initialRoute = 'Page1') => {
             return cleaned;
           });
 
-          saveMatches(updatedMatches, changedMatches);
+          saveMatches(updatedMatches, changedMatches).then(handleSaveResult);
           return updatedMatches;
         });
       }
@@ -219,21 +237,14 @@ export const useAppController = (initialRoute = 'Page1') => {
       finalResult: { homeScore: 0, awayScore: 0, outcome: 'PENDING' },
     };
 
-    setMatches((prev) => {
-      const updated = sortMatchesByDate([newM, ...prev]);
-      saveMatches(updated, [newM]);
-      return updated;
-    });
+    setMatches((prev) => sortMatchesByDate([newM, ...prev]));
+    insertMatch(newM).then(handleSaveResult);
   };
 
   const deleteMatch = (id) => {
     confirmAction('Wedstrijd verwijderen', 'Weet je zeker dat je deze wedstrijd wilt verwijderen?', () => {
-      setMatches((prev) => {
-        const updated = prev.filter((m) => m.id !== id);
-        saveMatches(updated, []);
-        deleteStoredMatch(id);
-        return updated;
-      });
+      setMatches((prev) => prev.filter((m) => m.id !== id));
+      deleteStoredMatch(id).then(handleSaveResult);
       if (activeMatchId === id) {
         setActiveMatchId(null);
         setCurrentRoute('Page2');
@@ -312,6 +323,7 @@ export const useAppController = (initialRoute = 'Page1') => {
     updatePlayer,
     activeMatch,
     isLoaded,
+    reload,
     addPlayer,
     togglePlayerActive,
     deletePlayer,

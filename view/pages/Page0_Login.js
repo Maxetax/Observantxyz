@@ -11,68 +11,86 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import {
-  hashPassword,
-  sanitizeName,
-  sanitizePasswordInput,
-  DEFAULT_PASSWORD_HASH,
-} from '../../controller/security';
+import { sanitizeName, sanitizePasswordInput } from '../../controller/security';
+import { supabase } from '../../controller/supabase';
+import { signInWithName } from '../../controller/authFlow';
+import { MIN_PASSWORD_LENGTH } from '../../controller/passwordRules';
 
-export default function Page0_Login({ players, onLoginSuccess }) {
+const MESSAGES = {
+  invalid: 'Ongeldige inloggegevens.',
+  locked: 'Te veel pogingen. Probeer het over 15 minuten opnieuw.',
+  weak_new_password: `Kies een wachtwoord van minimaal ${MIN_PASSWORD_LENGTH} tekens.`,
+  error: 'Er is een fout opgetreden bij het inloggen.',
+};
+
+function PasswordField({ label, value, onChange, show, onToggleShow, onSubmit, placeholder }) {
+  return (
+    <View style={styles.inputGroup}>
+      <Text style={styles.label}>{label}</Text>
+      <View style={styles.inputWrapper}>
+        <Feather name="lock" size={16} color="#94A3B8" style={styles.fieldIcon} />
+        <TextInput
+          style={[styles.input, { paddingRight: 40 }]}
+          placeholder={placeholder}
+          placeholderTextColor="#94A3B8"
+          secureTextEntry={!show}
+          value={value}
+          onChangeText={(text) => onChange(sanitizePasswordInput(text))}
+          autoCapitalize="none"
+          autoCorrect={false}
+          onSubmitEditing={onSubmit}
+        />
+        {onToggleShow ? (
+          <TouchableOpacity style={styles.eyeBtn} onPress={onToggleShow}>
+            <Feather name={show ? 'eye-off' : 'eye'} size={16} color="#94A3B8" />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+// On success Supabase fires onAuthStateChange; Landingpage takes it from there.
+export default function Page0_Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [needsNewPassword, setNeedsNewPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordRepeat, setNewPasswordRepeat] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
-  // Hier pas trimmen bij het verzenden:
-  const cleanUser = sanitizeName(username).trim();
-  const cleanPwd = sanitizePasswordInput(password).trim();
-
-  if (!cleanUser || !cleanPwd) {
-    setErrorMsg('Vul zowel je gebruikersnaam als wachtwoord in.');
-    return;
-  }
+    if (loading) return;
+    const cleanUser = sanitizeName(username).trim();
+    if (!cleanUser || !password.trim()) {
+      setErrorMsg('Vul zowel je gebruikersnaam als wachtwoord in.');
+      return;
+    }
+    if (needsNewPassword && newPassword !== newPasswordRepeat) {
+      setErrorMsg('De nieuwe wachtwoorden zijn niet gelijk.');
+      return;
+    }
 
     setLoading(true);
     setErrorMsg('');
+    const { status } = await signInWithName(supabase, {
+      name: cleanUser,
+      password,
+      newPassword: needsNewPassword ? newPassword : undefined,
+    });
+    setLoading(false);
 
-    try {
-      // Zoek speler op basis van naam (hoofdletter-ongevoelig) en controleer of het een vaste actieve speler is
-      const matchedPlayer = (players || []).find(
-        (p) =>
-          p.name.trim().toLowerCase() === cleanUser.toLowerCase() &&
-          p.type === 'VAST' &&
-          p.active
-      );
-
-      if (!matchedPlayer) {
-        setErrorMsg('Ongeldige inloggegevens.');
-        setLoading(false);
-        return;
-      }
-
-      // Bereken hash van ingevoerd wachtwoord
-      const computedHash = await hashPassword(cleanPwd);
-      const expectedHash =
-        matchedPlayer.passwordHash ||
-        matchedPlayer.password_hash ||
-        DEFAULT_PASSWORD_HASH;
-
-      // Verifieer wachtwoord hash
-      if (computedHash === expectedHash) {
-        onLoginSuccess(matchedPlayer);
-      } else {
-        setErrorMsg('Ongeldige inloggegevens.');
-      }
-    } catch (err) {
-      console.error('Login error:', err);
-      setErrorMsg('Er is een fout opgetreden bij het inloggen.');
-    } finally {
-      setLoading(false);
+    if (status === 'ok') return;
+    if (status === 'needs_new_password') {
+      setNeedsNewPassword(true);
+      return;
     }
+    setErrorMsg(MESSAGES[status] ?? MESSAGES.error);
   };
+
+  const clearError = () => setErrorMsg('');
 
   return (
     <KeyboardAvoidingView
@@ -107,49 +125,51 @@ export default function Page0_Login({ players, onLoginSuccess }) {
               placeholder="Volledige naam (bijv. Lars van Dijk)"
               placeholderTextColor="#94A3B8"
               value={username}
+              editable={!needsNewPassword}
               onChangeText={(text) => {
                 // Geen .trim() hier, zodat de spatie blijft staan tijdens het typen!
                 setUsername(sanitizeName(text));
-                setErrorMsg('');
+                clearError();
               }}
               autoCapitalize="words"
               autoCorrect={false}
             />
-
           </View>
         </View>
 
-        {/* Wachtwoord Veld */}
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Wachtwoord</Text>
-          <View style={styles.inputWrapper}>
-            <Feather name="lock" size={16} color="#94A3B8" style={styles.fieldIcon} />
-            <TextInput
-              style={[styles.input, { paddingRight: 40 }]}
-              placeholder="Wachtwoord"
-              placeholderTextColor="#94A3B8"
-              secureTextEntry={!showPassword}
-              value={password}
-              onChangeText={(text) => {
-                setPassword(sanitizePasswordInput(text));
-                setErrorMsg('');
-              }}
-              autoCapitalize="none"
-              autoCorrect={false}
-              onSubmitEditing={handleLogin}
+        <PasswordField
+          label="Wachtwoord"
+          placeholder="Wachtwoord"
+          value={password}
+          onChange={(v) => { setPassword(v); clearError(); }}
+          show={showPassword}
+          onToggleShow={() => setShowPassword(!showPassword)}
+          onSubmit={handleLogin}
+        />
+
+        {needsNewPassword ? (
+          <View style={styles.newPasswordBox}>
+            <Text style={styles.newPasswordInfo}>
+              {`Kies een nieuw wachtwoord van minimaal ${MIN_PASSWORD_LENGTH} tekens.`}
+            </Text>
+            <PasswordField
+              label="Kies een nieuw wachtwoord"
+              placeholder="Nieuw wachtwoord"
+              value={newPassword}
+              onChange={(v) => { setNewPassword(v); clearError(); }}
+              show={showPassword}
+              onSubmit={handleLogin}
             />
-            <TouchableOpacity
-              style={styles.eyeBtn}
-              onPress={() => setShowPassword(!showPassword)}
-            >
-              <Feather
-                name={showPassword ? 'eye-off' : 'eye'}
-                size={16}
-                color="#94A3B8"
-              />
-            </TouchableOpacity>
+            <PasswordField
+              label="Herhaal nieuw wachtwoord"
+              placeholder="Herhaal nieuw wachtwoord"
+              value={newPasswordRepeat}
+              onChange={(v) => { setNewPasswordRepeat(v); clearError(); }}
+              show={showPassword}
+              onSubmit={handleLogin}
+            />
           </View>
-        </View>
+        ) : null}
 
         {/* Inlog Knop */}
         <TouchableOpacity
@@ -161,7 +181,9 @@ export default function Page0_Login({ players, onLoginSuccess }) {
           {loading ? (
             <ActivityIndicator color="#FFFFFF" size="small" />
           ) : (
-            <Text style={styles.loginBtnText}>Inloggen</Text>
+            <Text style={styles.loginBtnText}>
+              {needsNewPassword ? 'Wachtwoord opslaan en inloggen' : 'Inloggen'}
+            </Text>
           )}
         </TouchableOpacity>
       </View>
@@ -292,5 +314,17 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '700',
+  },
+  newPasswordBox: {
+    marginTop: 4,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#E2E8F0",
+  },
+  newPasswordInfo: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#2563EB",
+    marginBottom: 8,
   },
 });
