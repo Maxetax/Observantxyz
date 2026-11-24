@@ -52,6 +52,33 @@ test('migration refuses when there is no active admin', async () => {
   await assert.rejects(db.exec(MIGRATION), /admin/i);
 });
 
+const dropHash = () => read('supabase/migrations/20261124000002_drop_password_hash.sql');
+
+test('drop-hash migration refuses while active VAST players have not moved over', async () => {
+  const db = await freshDb();
+  await db.exec(MIGRATION);
+  await assert.rejects(db.exec(dropHash()), /Lars van Dijk.*Daan Meijer|Daan Meijer.*Lars van Dijk/);
+  await db.exec('rollback');
+  const r = await db.query("select count(*)::int as n from information_schema.columns where table_name = 'players' and column_name = 'password_hash'");
+  assert.equal(r.rows[0].n, 1);
+});
+
+test('drop-hash migration removes the column once everyone has moved over', async () => {
+  const db = await freshDb();
+  await db.exec(MIGRATION);
+  await db.exec(`
+    insert into auth.users (id) values ('00000000-0000-0000-0000-000000000001'), ('00000000-0000-0000-0000-000000000002');
+    update players set auth_user_id = '00000000-0000-0000-0000-000000000001' where id = 'p-1';
+    update players set auth_user_id = '00000000-0000-0000-0000-000000000002' where id = 'p-2';
+  `);
+  await db.exec(dropHash());
+  const r = await db.query("select count(*)::int as n from information_schema.columns where table_name = 'players' and column_name = 'password_hash'");
+  assert.equal(r.rows[0].n, 0);
+  // The access-rule tests still pass afterwards.
+  const results = await db.exec(RLS_TESTS);
+  assert.equal(lastResult(results), 'ALL AUTH RLS TESTS PASSED');
+});
+
 test('rollback restores open access', async () => {
   const db = await freshDb();
   await db.exec(MIGRATION);

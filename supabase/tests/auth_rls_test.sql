@@ -68,8 +68,12 @@ begin
   select count(*) into n from public.players where id like 't-%';
   if n <> 4 then raise exception 'FAIL: player sees % test players, expected 4', n; end if;
 
-  begin perform password_hash from public.players; exception when insufficient_privilege then denied := true; end;
-  if not denied then raise exception 'FAIL: player can read password_hash'; end if;
+  -- Only while the column still exists (20261124000002 drops it).
+  if exists (select 1 from information_schema.columns
+             where table_schema = 'public' and table_name = 'players' and column_name = 'password_hash') then
+    begin execute 'select password_hash from public.players'; exception when insufficient_privilege then denied := true; end;
+    if not denied then raise exception 'FAIL: player can read password_hash'; end if;
+  end if;
 
   update public.players set phone = '0600000000' where id = 't-player';
   get diagnostics n = row_count;
